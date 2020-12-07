@@ -31,6 +31,9 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'."""
 
     inputs_flat = tf.reshape(inputs, [-1, inputs.shape[-1]])
+    assert inputs.shape[-1] == 3
+    assert viewdirs.shape[-1] == 2
+    
 
     embedded = embed_fn(inputs_flat)
     if viewdirs is not None:
@@ -38,6 +41,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         input_dirs_flat = tf.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = tf.concat([embedded, embedded_dirs], -1)
+    embedded = tf.concat([embedded, inputs_flat], -1)
 
     outputs_flat = batchify(fn, netchunk)(embedded)
     outputs = tf.reshape(outputs_flat, list(
@@ -380,6 +384,9 @@ def create_nerf(args):
 
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
+    n_elts = 4
+    sif_params, sif_vars = init_ldif(n_elts)
+
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
@@ -390,8 +397,9 @@ def create_nerf(args):
     model = init_nerf_model(
         D=args.netdepth, W=args.netwidth,
         input_ch=input_ch, output_ch=output_ch, skips=skips,
-        input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-    grad_vars = model.trainable_variables
+        input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
+        sif_params=sif_params, n_elts=n_elts)
+    grad_vars = model.trainable_variables + sif_vars
     models = {'model': model}
 
     model_fine = None
@@ -399,7 +407,8 @@ def create_nerf(args):
         model_fine = init_nerf_model(
             D=args.netdepth_fine, W=args.netwidth_fine,
             input_ch=input_ch, output_ch=output_ch, skips=skips,
-            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
+            sif_params=sif_params, n_elts=n_elts)
         grad_vars += model_fine.trainable_variables
         models['model_fine'] = model_fine
 

@@ -76,9 +76,109 @@ def get_embedder(multires, i=0):
 
 
 # Model architecture
+def roll_pitch_yaw_to_rotation_matrices(roll_pitch_yaw):
+  """Converts roll-pitch-yaw angles to rotation matrices.
+  Args:
+    roll_pitch_yaw: Tensor (or convertible value) with shape [..., 3]. The last
+      dimension contains the roll, pitch, and yaw angles in radians.  The
+      resulting matrix rotates points by first applying roll around the x-axis,
+      then pitch around the y-axis, then yaw around the z-axis.
+  Returns:
+     Tensor with shape [..., 3, 3]. The 3x3 rotation matrices corresponding to
+     the input roll-pitch-yaw angles.
+  """
+  roll_pitch_yaw = tf.convert_to_tensor(roll_pitch_yaw)
 
-def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+  cosines = tf.cos(roll_pitch_yaw)
+  sines = tf.sin(roll_pitch_yaw)
+  cx, cy, cz = tf.unstack(cosines, axis=-1)
+  sx, sy, sz = tf.unstack(sines, axis=-1)
+  # pyformat: disable
+  rotation = tf.stack(
+      [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
+       sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
+       -sy, cy * sx, cy * cx], axis=-1)
+  # pyformat: enable
+  shape = tf.concat([tf.shape(rotation)[:-1], [3, 3]], axis=0)
+  rotation = tf.reshape(rotation, shape)
+  return rotation
 
+def decode_covariance_roll_pitch_yaw(radii, rotations, invert=False):
+  """Converts 6-D radus vectors to the corresponding covariance matrices.
+  Args:
+    radii: Tensor with shape [EC, 3]. Covariances of the three Gaussian axes. 
+    rotations: Tensor with shape [EC, 3]. The roll-pitch-yaw rotation angles
+        of the Gaussian frame.
+    invert: Whether to return the inverse covariance.
+  Returns:
+     Tensor with shape [..., 3, 3]. The 3x3 (optionally inverted) covariance
+     matrices corresponding to the input radius vectors.
+  """
+  DIV_EPSILON=1e-8
+  d = 1.0 / (radii + DIV_EPSILON) if invert else radii
+  diag = tf.matrix_diag(d)
+  rotation = roll_pitch_yaw_to_rotation_matrices(rotations)
+  return tf.matmul(tf.matmul(rotation, diag), rotation, transpose_b=True)
+
+def eval_rbf(samples, centers, radii, rotations):
+  """Samples gaussian radial basis functions at specified coordinates.
+  Args:
+    samples: Tensor with shape [N, 3], where N is the number of samples to evaluate.
+    centers: Tensor with shape [EC, 3]. Contains the [x,y,z] coordinates of the
+      RBF centers.
+    radii: Tensor with shape [EC, 3]. First three numbers are covariances of
+      the three Gaussian axes. 
+    rotations: the roll-pitch-yaw rotation angles of the Gaussian frame.
+  Returns:
+     Tensor with shape [EC, N, 1]. The basis function strength at each sample.
+        TODO(kgenova) maybe switch to [N, EC].
+     location.
+  """
+  with tf.name_scope('sample_cov_bf'):
+    assert len(samples.shape) == 2
+    samples = tf.expand_dims(samples, axis=0) # Now shape is [1, N, 3]
+    
+    # Compute the samples' offset from center, then extract the coordinates.
+    diff = samples - tf.expand_dims(centers, axis=-2) # broadcast to [1, n, 3] - [ec, 1, 3] -> [ec, n, 3]
+    x, y, z = tf.unstack(diff, axis=-1)
+    # Decode 6D radius vectors into inverse covariance matrices, then extract
+    # unique elements.
+    inv_cov = decode_covariance_roll_pitch_yaw(radii, rotations, invert=True)
+    shape = tf.concat([tf.shape(inv_cov)[:-2], [1, 9]], axis=0)
+    inv_cov = tf.reshape(inv_cov, shape)
+    c00, c01, c02, _, c11, c12, _, _, c22 = tf.unstack(inv_cov, axis=-1)
+    # Compute function value.
+    dist = (
+        x * (c00 * x + c01 * y + c02 * z) + y * (c01 * x + c11 * y + c12 * z) +
+        z * (c02 * x + c12 * y + c22 * z))
+    dist = tf.exp(-0.5 * dist)
+    return dist
+
+
+def init_ldif(n_elts=32):
+    init_constants = np.random.uniform(low=2.0, high=4.0, size=(n_elts,1))
+    constant_vars = tf.Variable(initial_value=init_constants, trainable=True)
+    constants = tf.abs(constant_vars)  # Can't be negative
+
+    init_centers = np.random.uniform(low=-1, high=1, size=(n_elts, 3))
+    centers = tf.Variable(
+        initial_value=init_centers, 
+        trainable=True)
+
+    init_radii = np.random.uniform(low=0, high=0.3, size=(n_elts, 3))
+    radii_vars = tf.Variable(initial_value=init_radii, trainable=True)
+    radii = tf.abs(radii_vars) # Can't be negative
+
+    init_rotations = np.random.uniform(low=-1 * np.pi, high=np.pi, size=(n_elts, 3))
+    rotation_vars = tf.Variable(initial_value=init_rotations, trainable=True)
+    rotations = rotation_vars  # Wraps around since we just take sin/cos. Maybe need to do more here.
+    # TODO(kgenova) When creating world2local frames, check 
+    grad_vars = [constant_vars, centers, radii_vars, rotation_vars]
+    return (constants, centers, radii, rotations), grad_vars
+
+
+def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False,
+    sif_params=None, n_elts=None):
     relu = tf.keras.layers.ReLU()
     def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
 
@@ -87,32 +187,66 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     input_ch = int(input_ch)
     input_ch_views = int(input_ch_views)
 
-    inputs = tf.keras.Input(shape=(input_ch + input_ch_views))
-    inputs_pts, inputs_views = tf.split(inputs, [input_ch, input_ch_views], -1)
+    # TODO(kgenova) If input channels is 3, when does the embedding get applied?
+    assert input_ch == 3
+    assert input_ch_views == 2
+    assert output_ch == 4
+    assert use_viewdirs
+    assert sif_params is not None
+    assert n_elts is not None
+    constants, centers, radii, rotations = sif_params
+
+    inputs = tf.keras.Input(shape=(input_ch + input_ch_views + 3))
+    inputs_pts, inputs_views, input_unembedded_pts = tf.split(inputs, [input_ch, input_ch_views, 3], -1)
     inputs_pts.set_shape([None, input_ch])
     inputs_views.set_shape([None, input_ch_views])
+    input_unembedded_pts.set_shape([None, 3])
 
-    print(inputs.shape, inputs_pts.shape, inputs_views.shape)
-    outputs = inputs_pts
-    for i in range(D):
-        outputs = dense(W)(outputs)
-        if i in skips:
-            outputs = tf.concat([inputs_pts, outputs], -1)
+    rbfs = eval_rbf(input_unembedded_pts, centers, radii, rotations)  # Shape [EC, N, 1]
+    constants = tf.expand_dims(constants, axis=1)  # Shape [EC, 1, 1]
+    rbfs = rbfs * constants  # TODO(kgenova) If normalizing, need to scale so that weight sum is usually > 1.0
+    # TODO(kgenova) Since background is white, maybe we should decay to [1, 1, 1, 0], not [0, 0, 0, 0].
+    # TODO(kgenova) An alternate way of avoiding degeneracy is to have a dummy blob with weight X that wants [1, 1, 1, 0].
+    assert len(rbfs.shape) == 3
+    # TODO(kgenova) Make these loosely sum up to one?
+    min_weight = 1.0
+    rbf_sums = tf.reduce_sum(rbfs, axis=0, keepdims=True) # [1, N, 1]
+    rbf_sums = tf.maximum(rbf_sums, min_weight)
+    rbfs = rbfs / rbf_sums
 
-    if use_viewdirs:
-        alpha_out = dense(1, act=None)(outputs)
-        bottleneck = dense(256, act=None)(outputs)
-        inputs_viewdirs = tf.concat(
-            [bottleneck, inputs_views], -1)  # concat viewdirs
-        outputs = inputs_viewdirs
-        # The supplement to the paper states there are 4 hidden layers here, but this is an error since
-        # the experiments were actually run with 1 hidden layer, so we will leave it as 1.
-        for i in range(1):
-            outputs = dense(W//2)(outputs)
-        outputs = dense(3, act=None)(outputs)
-        outputs = tf.concat([outputs, alpha_out], -1)
-    else:
-        outputs = dense(output_ch, act=None)(outputs)
+    outputs_per_elt = []
+    for i in range(n_elts):
+      # Make a NeRF per element:
+      print(inputs.shape, inputs_pts.shape, inputs_views.shape)
+      # TODO(kgenova) Consider transforming (pre-embedding) to local frame, instead of doing all in global frame.
+      # Need to also transform input views for that...
+      outputs = inputs_pts
+      for i in range(D):
+          outputs = dense(W)(outputs)
+          if i in skips:
+              outputs = tf.concat([inputs_pts, outputs], -1)
+
+      if use_viewdirs:
+          alpha_out = dense(1, act=None)(outputs)
+          bottleneck = dense(256, act=None)(outputs)
+          inputs_viewdirs = tf.concat(
+              [bottleneck, inputs_views], -1)  # concat viewdirs
+          outputs = inputs_viewdirs
+          # The supplement to the paper states there are 4 hidden layers here, but this is an error since
+          # the experiments were actually run with 1 hidden layer, so we will leave it as 1.
+          for i in range(1):
+              outputs = dense(W//2)(outputs)
+          outputs = dense(3, act=None)(outputs)
+          outputs = tf.concat([outputs, alpha_out], -1)
+      else:
+          outputs = dense(output_ch, act=None)(outputs)
+      outputs_per_elt.append(outputs)
+    
+    assert len(outputs_per_elt) == n_elts
+    outputs = tf.stack(outputs_per_elt, axis=0)  # Now should have shape [EC, N, output_ch]
+    assert len(outputs) == 3
+    outputs = tf.reduce_sum(outputs * rbfs, axis=0)
+    # outputs should have shape [N, output_ch]
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model
