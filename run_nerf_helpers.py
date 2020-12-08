@@ -151,34 +151,81 @@ def eval_rbf(samples, centers, radii, rotations):
     dist = (
         x * (c00 * x + c01 * y + c02 * z) + y * (c01 * x + c11 * y + c12 * z) +
         z * (c02 * x + c12 * y + c22 * z))
-    dist = tf.exp(-0.5 * dist)
+    dist = tf.expand_dims(tf.exp(-0.5 * dist), axis=-1)
+    #dist.set_shape([4, 65536, 1])
     return dist
 
 
 def init_ldif(n_elts=32):
-    init_constants = np.random.uniform(low=2.0, high=4.0, size=(n_elts,1))
-    constant_vars = tf.Variable(initial_value=init_constants, trainable=True)
+    init_constants = np.random.uniform(low=2.0, high=4.0, size=(n_elts,1)).astype(np.float32)
+    #constant_vars = tf.Variable(initial_value=init_constants, trainable=True)
+    constant_vars = tf.keras.backend.variable(value=init_constants, dtype='float32', name='constants')
     constants = tf.abs(constant_vars)  # Can't be negative
 
-    init_centers = np.random.uniform(low=-1, high=1, size=(n_elts, 3))
+    init_centers = np.random.uniform(low=-1, high=1, size=(n_elts, 3)).astype(np.float32)
     centers = tf.Variable(
         initial_value=init_centers, 
         trainable=True)
 
-    init_radii = np.random.uniform(low=0, high=0.3, size=(n_elts, 3))
+    init_radii = np.random.uniform(low=0, high=0.3, size=(n_elts, 3)).astype(np.float32)
     radii_vars = tf.Variable(initial_value=init_radii, trainable=True)
     radii = tf.abs(radii_vars) # Can't be negative
 
-    init_rotations = np.random.uniform(low=-1 * np.pi, high=np.pi, size=(n_elts, 3))
-    rotation_vars = tf.Variable(initial_value=init_rotations, trainable=True)
-    rotations = rotation_vars  # Wraps around since we just take sin/cos. Maybe need to do more here.
+    init_rotations = np.random.uniform(low=-1 * np.pi, high=np.pi, size=(n_elts, 3)).astype(np.float32)
+    #rotation_vars = tf.Variable(initial_value=init_rotations, trainable=True)
+    rotations = tf.keras.backend.variable(value=init_rotations, dtype='float32', name='rotations')
+    #rotations = rotation_vars  # Wraps around since we just take sin/cos. Maybe need to do more here.
     # TODO(kgenova) When creating world2local frames, check 
-    grad_vars = [constant_vars, centers, radii_vars, rotation_vars]
+    grad_vars = [constant_vars, centers, radii_vars, rotations]
     return (constants, centers, radii, rotations), grad_vars
 
 
+class LDIFLayer(tf.keras.layers.Layer):
+    def __init__(self, n_elts):
+        super(LDIFLayer, self).__init__()
+        self.n_elts = n_elts
+
+    def build(self, input_shape):
+        self.constants = self.add_weight(shape=(self.n_elts, 1),
+                initializer=tf.keras.initializers.RandomUniform(2.0, 4.0),
+                trainable=True)
+        self.centers = self.add_weight(shape=(self.n_elts, 3),
+                initializer=tf.keras.initializers.RandomUniform(-1.0, 1.0),
+                trainable=True)
+        self.radii = self.add_weight(shape=(self.n_elts, 3),
+                initializer=tf.keras.initializers.RandomUniform(0.0, 0.3),
+                trainable=True)
+        self.rotations = self.add_weight(shape=(self.n_elts, 3),
+                initializer=tf.keras.initializers.RandomUniform(-1.0 * np.pi, np.pi),
+                trainable=True)
+
+    def call(self, world_space_points, nerflet_activations):
+        constants = tf.abs(self.constants)
+        centers = self.centers
+        radii = tf.abs(self.radii)
+        rotations = self.rotations  # Wraps around infinitely?
+        
+        # Inputs are NeRF outputs to be blended:
+        rbfs = eval_rbf(world_space_points, centers, radii, rotations)
+        constants = tf.expand_dims(constants, axis=1)
+        rbfs = rbfs * constants
+
+        assert len(rbfs.shape) == 3
+
+        assert len(nerflet_activations) == self.n_elts
+        nerflet_activations = tf.stack(nerflet_activations)
+
+        min_weight = 1.0
+        rbf_sums = tf.reduce_sum(rbfs, axis=0, keepdims=True) # [1, N, 1]
+        rbf_sums = tf.maximum(rbf_sums, min_weight)
+        rbfs = rbfs / rbf_sums
+        outputs = tf.reduce_sum(nerflet_activations * rbfs, axis=0)
+
+        return outputs
+
+
 def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False,
-    sif_params=None, n_elts=None):
+    n_elts=None):
     relu = tf.keras.layers.ReLU()
     def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
 
@@ -188,13 +235,12 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     input_ch_views = int(input_ch_views)
 
     # TODO(kgenova) If input channels is 3, when does the embedding get applied?
-    assert input_ch == 3
-    assert input_ch_views == 2
+    #assert input_ch == 63
+    #assert input_ch_views == 2
     assert output_ch == 4
     assert use_viewdirs
-    assert sif_params is not None
     assert n_elts is not None
-    constants, centers, radii, rotations = sif_params
+    #constants, centers, radii, rotations = sif_params
 
     inputs = tf.keras.Input(shape=(input_ch + input_ch_views + 3))
     inputs_pts, inputs_views, input_unembedded_pts = tf.split(inputs, [input_ch, input_ch_views, 3], -1)
@@ -202,19 +248,24 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     inputs_views.set_shape([None, input_ch_views])
     input_unembedded_pts.set_shape([None, 3])
 
-    rbfs = eval_rbf(input_unembedded_pts, centers, radii, rotations)  # Shape [EC, N, 1]
-    constants = tf.expand_dims(constants, axis=1)  # Shape [EC, 1, 1]
-    rbfs = rbfs * constants  # TODO(kgenova) If normalizing, need to scale so that weight sum is usually > 1.0
+    #rbfs = eval_rbf(input_unembedded_pts, centers, radii, rotations)  # Shape [EC, N, 1]
+    #print(f'RBF Shapes: {rbfs.shape}')
+    #constants = tf.expand_dims(constants, axis=1)  # Shape [EC, 1, 1]
+    #rbfs = rbfs * constants  # TODO(kgenova) If normalizing, need to scale so that weight sum is usually > 1.0
     # TODO(kgenova) Since background is white, maybe we should decay to [1, 1, 1, 0], not [0, 0, 0, 0].
     # TODO(kgenova) An alternate way of avoiding degeneracy is to have a dummy blob with weight X that wants [1, 1, 1, 0].
-    assert len(rbfs.shape) == 3
+    #assert len(rbfs.shape) == 3
     # TODO(kgenova) Make these loosely sum up to one?
-    min_weight = 1.0
-    rbf_sums = tf.reduce_sum(rbfs, axis=0, keepdims=True) # [1, N, 1]
-    rbf_sums = tf.maximum(rbf_sums, min_weight)
-    rbfs = rbfs / rbf_sums
+    #min_weight = 1.0
+    #rbf_sums = tf.reduce_sum(rbfs, axis=0, keepdims=True) # [1, N, 1]
+    #rbf_sums = tf.maximum(rbf_sums, min_weight)
+    #rbfs = rbfs / rbf_sums
+    #rbfs = tf.keras.backend.print_tensor(rbfs, message='rbfs = ')
+    #tf.print("RBFs: ", rbfs)
 
-    outputs_per_elt = []
+    #rbfs = tf.zeros_like(rbfs)
+
+    nerflet_activations = []
     for i in range(n_elts):
       # Make a NeRF per element:
       print(inputs.shape, inputs_pts.shape, inputs_views.shape)
@@ -240,13 +291,15 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
           outputs = tf.concat([outputs, alpha_out], -1)
       else:
           outputs = dense(output_ch, act=None)(outputs)
-      outputs_per_elt.append(outputs)
-    
-    assert len(outputs_per_elt) == n_elts
-    outputs = tf.stack(outputs_per_elt, axis=0)  # Now should have shape [EC, N, output_ch]
-    assert len(outputs) == 3
-    outputs = tf.reduce_sum(outputs * rbfs, axis=0)
+      nerflet_activations.append(outputs)
+   
+    #assert len(outputs_per_elt) == n_elts
+    #outputs = tf.stack(outputs_per_elt, axis=0)  # Now should have shape [EC, N, output_ch]
+    #assert len(outputs.shape) == 3
+    #outputs = tf.reduce_sum(outputs * rbfs, axis=0)
     # outputs should have shape [N, output_ch]
+    ldif = LDIFLayer(n_elts=n_elts)
+    outputs = ldif(input_unembedded_pts, nerflet_activations)
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model

@@ -31,8 +31,9 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'."""
 
     inputs_flat = tf.reshape(inputs, [-1, inputs.shape[-1]])
-    assert inputs.shape[-1] == 3
-    assert viewdirs.shape[-1] == 2
+    #print('Inputs
+    #assert inputs.shape[-1] == 3
+    #assert viewdirs.shape[-1] == 2
     
 
     embedded = embed_fn(inputs_flat)
@@ -41,7 +42,9 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         input_dirs_flat = tf.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = tf.concat([embedded, embedded_dirs], -1)
+    #print(f'Embedded, inputs flat shapes: {embedded.shape}, {inputs_flat.shape}')
     embedded = tf.concat([embedded, inputs_flat], -1)
+    #print(f'New embedded shape {embedded.shape}')
 
     outputs_flat = batchify(fn, netchunk)(embedded)
     outputs = tf.reshape(outputs_flat, list(
@@ -385,7 +388,7 @@ def create_nerf(args):
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     n_elts = 4
-    sif_params, sif_vars = init_ldif(n_elts)
+    #sif_params, sif_vars = init_ldif(n_elts)
 
     input_ch_views = 0
     embeddirs_fn = None
@@ -398,8 +401,8 @@ def create_nerf(args):
         D=args.netdepth, W=args.netwidth,
         input_ch=input_ch, output_ch=output_ch, skips=skips,
         input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-        sif_params=sif_params, n_elts=n_elts)
-    grad_vars = model.trainable_variables + sif_vars
+        n_elts=n_elts)
+    grad_vars = model.trainable_variables
     models = {'model': model}
 
     model_fine = None
@@ -408,7 +411,7 @@ def create_nerf(args):
             D=args.netdepth_fine, W=args.netwidth_fine,
             input_ch=input_ch, output_ch=output_ch, skips=skips,
             input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-            sif_params=sif_params, n_elts=n_elts)
+            n_elts=n_elts)
         grad_vars += model_fine.trainable_variables
         models['model_fine'] = model_fine
 
@@ -577,6 +580,8 @@ def config_parser():
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=50000,
                         help='frequency of render_poses video saving')
+    parser.add_argument("--i_sif", type=int, default=10,
+                        help='frequency of sif txt saving')
 
     return parser
 
@@ -840,6 +845,75 @@ def train():
         #####           end            #####
 
         # Rest is logging
+        
+        def encode_sif_v1(constants, centers, radii, rotations):
+          """Encodes a ldif to a string, and optionally writes it to disk.
+          A description of the file format:
+          Line 1: SIF
+          Line 2: Three ints separated by spaces. In order:
+            1) The number of blobs.
+            2) The version ID for the blob types. I added this to be safe since
+               last time when we updated to add rotation it broke all the old txt
+               files. For now it will always be zero, which means the following
+               eleven explicit parameters will be given per blob (in order):
+                 1 constant. float.
+                 3 centers (XYZ). float.
+                 3 radii (XYZ diagonals). float.
+                 3 radii (roll-pitch-yaw rotations). float.
+                 1 symmetry ID type. int. For now it will be either 0 or 1:
+                     Zero: Not symmetric.
+                      One: Left-right (XY-plane) symmetry.
+            3) The number of implicit parameters per blob. So it will likely
+               be between 0-256.
+          After the first two lines, there is a line for each blob.
+           Each line will have the explicit parameters followed by the implicit
+           parameters. They are space separated.
+          Args:
+           sif_vector: The SIF vector to encode as a np array. Has shape
+             (element_count, element_length).
+          Returns:
+            A string encoding of v in the ldif v1 file format.
+          """
+          shape_count = constants.shape[0]
+          shape_len = 10
+          explicit_len = 10
+          #sif_vector = np.reshape(sif_vector, [shape_count, shape_len])
+          radii = np.sqrt(np.maximum(radii, 0))
+          #sif_vector[:, 4:7] = np.sqrt(np.maximum(sif_vector[:, 4:7], 0))
+          implicit_len = 0
+          header = 'SIF\n%i %i %i\n' % (shape_count, 0, implicit_len)
+          out = header
+          for row_idx in range(shape_count):
+            row_vec = np.concatenate([constants[row_idx, :], centers[row_idx, :], radii[row_idx, :], rotations[row_idx, :]])
+            row = ' '.join(10 * ['%.9g']) % tuple(row_vec.tolist())
+            #row = ' '.join(10 * ['%.9g']) % tuple(sif_vector[row_idx, :10].tolist())
+            #symmetry = int(row_idx < self.job.model_config.hparams.lyr)
+            symmetry = 0
+            row += ' %i' % symmetry
+            #if has_implicits:
+            #  implicit_params = ' '.join(implicit_len * ['%.9g']) % (
+            #      tuple(sif_vector[row_idx, 10:].tolist()))
+            #  row += ' ' + implicit_params
+            row += '\n'
+            out += row
+          return out
+
+        def save_sif(weights, path):
+            assert len(weights) == 100
+            constants = weights[96]
+            assert constants.shape == (4, 1)
+            centers = weights[97]
+            assert centers.shape == (4, 3)
+            radii = weights[98]
+            assert radii.shape == (4, 3)
+            rotations = weights[99]
+            assert rotations.shape == (4, 3)
+            print(f'Constants: {constants}')
+            print(f'Centers: {centers}')
+            print(f'Radii: {radii}')
+            print(f'Rotations: {rotations}')
+            with open(path, 'wt') as f:
+                f.write(encode_sif_v1(constants, centers, radii, rotations))
 
         def save_weights(net, prefix, i):
             path = os.path.join(
@@ -850,6 +924,11 @@ def train():
         if i % args.i_weights == 0:
             for k in models:
                 save_weights(models[k], k, i)
+
+        if i % args.i_sif == 0:
+            path = os.path.join(
+                basedir, expname, 'sif_{:06d}.txt'.format(i))
+            save_sif(models['model'].get_weights(), path)
 
         if i % args.i_video == 0 and i > 0:
 
