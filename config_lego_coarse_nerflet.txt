@@ -6,6 +6,10 @@ dataset_type = blender
 half_res = True
 no_batching = True
 
+netdepth = 4
+netwidth = 64
+n_elts = 32
+
 N_samples = 64
 N_importance = 0
 

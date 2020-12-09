@@ -157,7 +157,8 @@ def eval_rbf(samples, centers, radii, rotations):
 
 
 def init_ldif(n_elts=32):
-    init_constants = np.random.uniform(low=2.0, high=4.0, size=(n_elts,1)).astype(np.float32)
+    #init_constants = np.random.uniform(low=2.0, high=4.0, size=(n_elts,1)).astype(np.float32)
+    init_constants = np.random.uniform(low=100.0, high=200.0, size=(n_elts, 1)).astype(np.float32)
     #constant_vars = tf.Variable(initial_value=init_constants, trainable=True)
     constant_vars = tf.keras.backend.variable(value=init_constants, dtype='float32', name='constants')
     constants = tf.abs(constant_vars)  # Can't be negative
@@ -187,19 +188,19 @@ class LDIFLayer(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self.constants = self.add_weight(shape=(self.n_elts, 1),
-                initializer=tf.keras.initializers.RandomUniform(2.0, 4.0),
+                initializer=tf.keras.initializers.RandomUniform(10.0, 20.0),
                 trainable=True)
         self.centers = self.add_weight(shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-1.0, 1.0),
                 trainable=True)
         self.radii = self.add_weight(shape=(self.n_elts, 3),
-                initializer=tf.keras.initializers.RandomUniform(0.0, 0.3),
+                initializer=tf.keras.initializers.RandomUniform(0.25, 0.251),
                 trainable=True)
         self.rotations = self.add_weight(shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-1.0 * np.pi, np.pi),
                 trainable=True)
 
-    def call(self, world_space_points, nerflet_activations):
+    def call(self, world_space_points, nerflet_activations, dists):
         constants = tf.abs(self.constants)
         centers = self.centers
         radii = tf.abs(self.radii)
@@ -213,19 +214,40 @@ class LDIFLayer(tf.keras.layers.Layer):
         assert len(rbfs.shape) == 3
 
         assert len(nerflet_activations) == self.n_elts
-        nerflet_activations = tf.stack(nerflet_activations)
 
-        min_weight = 1.0
+        # Abs because each nerflet should be nonegative in rgb and opacity everywhere:
+        nerflet_activations = tf.abs(tf.stack(nerflet_activations))
+
+        # Map to RGBa:
+        # alpha = 1.0 - tf.exp(-tf.nn.relu(nerflet_activations[..., -1:] * dists)
+        # rgb = tf.math.sigmoid(nerflet_activations[..., :3])
+        # nerflet_activations = tf.concat([rgb, alpha], axis=-1)
+
+        #nerflet_activations = tf.keras.activations.sigmoid(tf.stack(nerflet_activations))
+        #nerflet_activations = tf.concat([nerflet_activations[..., :3], tf.abs(nerflet_act
+
+        n_to_print = 5
+
+
+        #min_weight = 0.01
         rbf_sums = tf.reduce_sum(rbfs, axis=0, keepdims=True) # [1, N, 1]
-        rbf_sums = tf.maximum(rbf_sums, min_weight)
-        rbfs = rbfs / rbf_sums
+        #rbf_sums = tf.maximum(rbf_sums, min_weight)
+        rbfs = rbfs / (rbf_sums + 0.01)
         outputs = tf.reduce_sum(nerflet_activations * rbfs, axis=0)
+
+        
+        tf.print('First points: ', world_space_points[:n_to_print, :])
+        tf.print('First rbf values: ', rbfs[:, :n_to_print, :])
+        tf.print('First nerflet activations: ', nerflet_activations[:, :n_to_print, :])
+        tf.print('First final results: ', outputs[:n_to_print, :])
 
         return outputs
 
 
 def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False,
     n_elts=None):
+    assert D == 4
+    assert W == 64
     relu = tf.keras.layers.ReLU()
     def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
 

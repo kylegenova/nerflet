@@ -1,8 +1,17 @@
 import subprocess as sp
 import os
+from joblib import Parallel, delayed
+import tqdm
+
+import sys
+if len(sys.argv) == 2:
+  every_k = sys.argv[1]
+else:
+  every_k = 10
 
 expname = 'lego_coarse_nerflet_test'
 def write_im(idx, i):
+  print(f'Processing {idx}, {i}')
   outdir = f'/home/kgenova/nerflet/logs/{expname}/qvid'
   if not os.path.isdir(outdir):
     os.mkdir(outdir)
@@ -11,17 +20,26 @@ def write_im(idx, i):
   sp.check_output(cmd, shell=True)
 
 idx = 10
-every_k = 10
 i = 0
+
+idxs = []
+inds = []
 while True:
   print(f'Idx: {idx}')
   path = f'/home/kgenova/nerflet/logs/{expname}/sif_{str(idx).zfill(6)}.txt'
   if not os.path.isfile(path):
     print(f'No sif {path}')
     break
-  write_im(idx, i)
+  #write_im(idx, i)
+  idxs.append(idx)
+  inds.append(i)
   idx += every_k
   i += 1
+to_proc = list(zip(idxs, inds))
+print(to_proc)
+for p in tqdm.tqdm(to_proc):
+  write_im(*p)
+#Parallel(n_jobs=1, backend='threading')(delayed(write_im(*a))(a) for a in tqdm.tqdm(to_proc))
 
 outvid = f'/home/kgenova/nerflet/logs/{expname}/sifs.mp4'
 cmd = f'ffmpeg -y -i /home/kgenova/nerflet/logs/{expname}/qvid/%06d.png {outvid}'

@@ -136,8 +136,8 @@ def render_rays(ray_batch,
         # regularize network during training (prevents floater artifacts).
         noise = 0.
         if raw_noise_std > 0.:
+            assert False
             noise = tf.random.normal(raw[..., 3].shape) * raw_noise_std
-
         # Predict density of each sample along each ray. Higher values imply
         # higher likelihood of being absorbed at this point.
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
@@ -401,7 +401,7 @@ def create_nerf(args):
         D=args.netdepth, W=args.netwidth,
         input_ch=input_ch, output_ch=output_ch, skips=skips,
         input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-        n_elts=n_elts)
+        n_elts=args.n_elts)
     grad_vars = model.trainable_variables
     models = {'model': model}
 
@@ -411,7 +411,7 @@ def create_nerf(args):
             D=args.netdepth_fine, W=args.netwidth_fine,
             input_ch=input_ch, output_ch=output_ch, skips=skips,
             input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-            n_elts=n_elts)
+            n_elts=args.n_elts)
         grad_vars += model_fine.trainable_variables
         models['model_fine'] = model_fine
 
@@ -487,6 +487,7 @@ def config_parser():
                         help='layers in network')
     parser.add_argument("--netwidth", type=int, default=256,
                         help='channels per layer')
+    parser.add_argument("--n_elts", type=int, default=4, help='Number of nerflets')
     parser.add_argument("--netdepth_fine", type=int,
                         default=8, help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256,
@@ -899,15 +900,16 @@ def train():
           return out
 
         def save_sif(weights, path):
-            assert len(weights) == 100
-            constants = weights[96]
-            assert constants.shape == (4, 1)
-            centers = weights[97]
-            assert centers.shape == (4, 3)
-            radii = weights[98]
-            assert radii.shape == (4, 3)
-            rotations = weights[99]
-            assert rotations.shape == (4, 3)
+            #print(len(weights))
+            start_idx = len(weights) - 4
+            constants = weights[start_idx]
+            assert constants.shape == (args.n_elts, 1)
+            centers = weights[start_idx + 1]
+            assert centers.shape == (args.n_elts, 3)
+            radii = weights[start_idx + 2]
+            assert radii.shape == (args.n_elts, 3)
+            rotations = weights[start_idx + 3]
+            assert rotations.shape == (args.n_elts, 3)
             print(f'Constants: {constants}')
             print(f'Centers: {centers}')
             print(f'Radii: {radii}')
