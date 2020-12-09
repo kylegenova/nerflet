@@ -199,6 +199,7 @@ class LDIFLayer(tf.keras.layers.Layer):
         self.rotations = self.add_weight(shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-1.0 * np.pi, np.pi),
                 trainable=True)
+        self.call_count = 0
 
     def call(self, world_space_points, nerflet_activations, dists):
         constants = tf.abs(self.constants)
@@ -216,12 +217,12 @@ class LDIFLayer(tf.keras.layers.Layer):
         assert len(nerflet_activations) == self.n_elts
 
         # Abs because each nerflet should be nonegative in rgb and opacity everywhere:
-        nerflet_activations = tf.abs(tf.stack(nerflet_activations))
+        nerflet_activations = tf.stack(nerflet_activations)
 
         # Map to RGBa:
-        # alpha = 1.0 - tf.exp(-tf.nn.relu(nerflet_activations[..., -1:] * dists)
-        # rgb = tf.math.sigmoid(nerflet_activations[..., :3])
-        # nerflet_activations = tf.concat([rgb, alpha], axis=-1)
+        alpha = 1.0 - tf.exp(-tf.nn.relu(nerflet_activations[..., -1:]) * tf.expand_dims(dists, axis=0))
+        rgb = tf.math.sigmoid(nerflet_activations[..., :3])
+        nerflet_activations = tf.concat([rgb, alpha], axis=-1)
 
         #nerflet_activations = tf.keras.activations.sigmoid(tf.stack(nerflet_activations))
         #nerflet_activations = tf.concat([nerflet_activations[..., :3], tf.abs(nerflet_act
@@ -235,12 +236,27 @@ class LDIFLayer(tf.keras.layers.Layer):
         rbfs = rbfs / (rbf_sums + 0.01)
         outputs = tf.reduce_sum(nerflet_activations * rbfs, axis=0)
 
-        
-        tf.print('First points: ', world_space_points[:n_to_print, :])
-        tf.print('First rbf values: ', rbfs[:, :n_to_print, :])
-        tf.print('First nerflet activations: ', nerflet_activations[:, :n_to_print, :])
-        tf.print('First final results: ', outputs[:n_to_print, :])
+        if self.call_count % 10 == 0:
+            tf.print('First points: ', world_space_points[:n_to_print, :])
+            tf.print('First rbf values: ', rbfs[:, :n_to_print, :])
+            tf.print('First nerflet activations: ', nerflet_activations[:, :n_to_print, :])
+            tf.print('First final results: ', outputs[:n_to_print, :])
+            tf.print('Average RBF sum: ', tf.reduce_mean(rbf_sums))
+            tf.print('Average (multiplied) rbf weight: ', tf.reduce_mean(rbfs))
+            # Compute the average number of nontrivial weights per nerf (and the mean per cell):
+            for thresh in [0.5, 0.1, 0.05, 0.01, 0.005, 0.0001]:
+                rbf_nontrivial = tf.cast(rbfs > thresh, dtype=tf.float32)
+                n_nontrivial = tf.reduce_mean(tf.reduce_sum(rbf_nontrivial, axis=0))
+                tf.print(f'Average number of nontrivial rbfs per point at thresh {thresh}: ', n_nontrivial)
+                n_nontrivial = tf.reduce_sum(rbf_nontrivial, axis=0)
+                tf.print(f'Number of nontrivial points per rbf at thresh {thresh}: ', n_nontrivial)
+                frac_sums_nontrivial = tf.reduce_mean(tf.cast(rbf_sums > thresh, dtype=tf.float32))
 
+            
+
+
+
+        self.call_count += 1
         return outputs
 
 
@@ -264,8 +280,8 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     assert n_elts is not None
     #constants, centers, radii, rotations = sif_params
 
-    inputs = tf.keras.Input(shape=(input_ch + input_ch_views + 3))
-    inputs_pts, inputs_views, input_unembedded_pts = tf.split(inputs, [input_ch, input_ch_views, 3], -1)
+    inputs = tf.keras.Input(shape=(input_ch + input_ch_views + 3 + 1))
+    inputs_pts, inputs_views, input_unembedded_pts, dists = tf.split(inputs, [input_ch, input_ch_views, 3, 1], -1)
     inputs_pts.set_shape([None, input_ch])
     inputs_views.set_shape([None, input_ch_views])
     input_unembedded_pts.set_shape([None, 3])
@@ -321,7 +337,7 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     #outputs = tf.reduce_sum(outputs * rbfs, axis=0)
     # outputs should have shape [N, output_ch]
     ldif = LDIFLayer(n_elts=n_elts)
-    outputs = ldif(input_unembedded_pts, nerflet_activations)
+    outputs = ldif(input_unembedded_pts, nerflet_activations, dists)
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model

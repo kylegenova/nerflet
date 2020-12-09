@@ -27,15 +27,19 @@ def batchify(fn, chunk):
     return ret
 
 
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+def run_network(inputs, viewdirs, dists, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'."""
 
     inputs_flat = tf.reshape(inputs, [-1, inputs.shape[-1]])
     #print('Inputs
     #assert inputs.shape[-1] == 3
     #assert viewdirs.shape[-1] == 2
+    dists = tf.reshape(dists, [-1, 1])
+    print('dists shape: ', dists.shape)
+    print('inputs flat shape: ', inputs_flat.shape)
+    #sys.exit(1)
     
-
+    
     embedded = embed_fn(inputs_flat)
     if viewdirs is not None:
         input_dirs = tf.broadcast_to(viewdirs[:, None], inputs.shape)
@@ -43,7 +47,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = tf.concat([embedded, embedded_dirs], -1)
     #print(f'Embedded, inputs flat shapes: {embedded.shape}, {inputs_flat.shape}')
-    embedded = tf.concat([embedded, inputs_flat], -1)
+    embedded = tf.concat([embedded, inputs_flat, dists], -1)
     #print(f'New embedded shape {embedded.shape}')
 
     outputs_flat = batchify(fn, netchunk)(embedded)
@@ -97,6 +101,21 @@ def render_rays(ray_batch,
         sample.
     """
 
+
+    def get_dists(z_vals, rays_d):
+        # Compute 'distance' (in time) between each integration time along a ray.
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+                                                                                  
+        # The 'distance' from the last integration time is infinity.
+        dists = tf.concat(
+            [dists, tf.broadcast_to([1e10], dists[..., :1].shape)],
+            axis=-1)  # [N_rays, N_samples]
+                                                                                  
+        # Multiply each distance by the norm of its corresponding direction ray
+        # to convert to real world distance (accounts for non-unit directions).
+        dists = dists * tf.linalg.norm(rays_d[..., None, :], axis=-1)
+        return dists
+
     def raw2outputs(raw, z_vals, rays_d):
         """Transforms model's predictions to semantically meaningful values.
 
@@ -114,23 +133,11 @@ def render_rays(ray_batch,
         """
         # Function for computing density from model prediction. This value is
         # strictly between [0, 1].
-        def raw2alpha(raw, dists, act_fn=tf.nn.relu): return 1.0 - \
-            tf.exp(-act_fn(raw) * dists)
-
-        # Compute 'distance' (in time) between each integration time along a ray.
-        dists = z_vals[..., 1:] - z_vals[..., :-1]
-
-        # The 'distance' from the last integration time is infinity.
-        dists = tf.concat(
-            [dists, tf.broadcast_to([1e10], dists[..., :1].shape)],
-            axis=-1)  # [N_rays, N_samples]
-
-        # Multiply each distance by the norm of its corresponding direction ray
-        # to convert to real world distance (accounts for non-unit directions).
-        dists = dists * tf.linalg.norm(rays_d[..., None, :], axis=-1)
+        # def raw2alpha(raw, dists, act_fn=tf.nn.relu): return 1.0 - \
+        #     tf.exp(-act_fn(raw) * dists)
 
         # Extract RGB of each sample position along each ray.
-        rgb = tf.math.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+        # rgb = tf.math.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
 
         # Add noise to model's predictions for density. Can be used to 
         # regularize network during training (prevents floater artifacts).
@@ -140,7 +147,10 @@ def render_rays(ray_batch,
             noise = tf.random.normal(raw[..., 3].shape) * raw_noise_std
         # Predict density of each sample along each ray. Higher values imply
         # higher likelihood of being absorbed at this point.
-        alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
+        # alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
+        
+        rgb = raw[..., :3]
+        alpha = raw[..., -1]
 
         # Compute weight for RGB of each sample along each ray.  A cumprod() is
         # used to express the idea of the ray not having reflected up to this
@@ -210,7 +220,8 @@ def render_rays(ray_batch,
         z_vals[..., :, None]  # [N_rays, N_samples, 3]
 
     # Evaluate model at each point.
-    raw = network_query_fn(pts, viewdirs, network_fn)  # [N_rays, N_samples, 4]
+    dists = get_dists(z_vals, rays_d)
+    raw = network_query_fn(pts, viewdirs, dists, network_fn)  # [N_rays, N_samples, 4]
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
         raw, z_vals, rays_d)
 
@@ -231,7 +242,8 @@ def render_rays(ray_batch,
 
         # Make predictions with network_fine.
         run_fn = network_fn if network_fine is None else network_fine
-        raw = network_query_fn(pts, viewdirs, run_fn)
+        dists = get_dists(z_vals, rays_d)
+        raw = network_query_fn(pts, viewdirs, dists, run_fn)
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
             raw, z_vals, rays_d)
 
@@ -415,8 +427,8 @@ def create_nerf(args):
         grad_vars += model_fine.trainable_variables
         models['model_fine'] = model_fine
 
-    def network_query_fn(inputs, viewdirs, network_fn): return run_network(
-        inputs, viewdirs, network_fn,
+    def network_query_fn(inputs, viewdirs, dists, network_fn): return run_network(
+        inputs, viewdirs, dists, network_fn,
         embed_fn=embed_fn,
         embeddirs_fn=embeddirs_fn,
         netchunk=args.netchunk)
