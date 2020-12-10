@@ -5,7 +5,7 @@ import tqdm
 
 import sys
 if len(sys.argv) == 2:
-  every_k = sys.argv[1]
+  every_k = int(sys.argv[1])
 else:
   every_k = 10
 
@@ -16,7 +16,7 @@ def write_im(idx, i):
   if not os.path.isdir(outdir):
     os.mkdir(outdir)
   out_path = f'{outdir}/{str(i).zfill(6)}.png'
-  cmd = f'qview /home/kgenova/nerflet/logs/{expname}/sif_{str(idx).zfill(6)}.txt -camera 2.8018 3.33692 4.7267  -0.443111 -0.459386 -0.769816  -0.209809 0.888016 -0.409154 -show_axes -image {out_path}'
+  cmd = f'qview /home/kgenova/nerflet/logs/{expname}/sif/sif_{str(idx).zfill(6)}.txt -camera 2.8018 3.33692 4.7267  -0.443111 -0.459386 -0.769816  -0.209809 0.888016 -0.409154 -show_axes -image {out_path}'
   sp.check_output(cmd, shell=True)
 
 idx = 10
@@ -26,7 +26,7 @@ idxs = []
 inds = []
 while True:
   print(f'Idx: {idx}')
-  path = f'/home/kgenova/nerflet/logs/{expname}/sif_{str(idx).zfill(6)}.txt'
+  path = f'/home/kgenova/nerflet/logs/{expname}/sif/sif_{str(idx).zfill(6)}.txt'
   if not os.path.isfile(path):
     print(f'No sif {path}')
     break

@@ -191,10 +191,10 @@ class LDIFLayer(tf.keras.layers.Layer):
                 initializer=tf.keras.initializers.RandomUniform(10.0, 20.0),
                 trainable=True)
         self.centers = self.add_weight(shape=(self.n_elts, 3),
-                initializer=tf.keras.initializers.RandomUniform(-1.0, 1.0),
+                initializer=tf.keras.initializers.RandomUniform(-0.45, 0.45),
                 trainable=True)
-        self.radii = self.add_weight(shape=(self.n_elts, 3),
-                initializer=tf.keras.initializers.RandomUniform(0.25, 0.251),
+        self.radii = self.add_weight(shape=(self.n_elts, 1),
+                initializer=tf.keras.initializers.RandomUniform(0.05, 0.06),
                 trainable=True)
         self.rotations = self.add_weight(shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-1.0 * np.pi, np.pi),
@@ -203,14 +203,19 @@ class LDIFLayer(tf.keras.layers.Layer):
 
     def call(self, world_space_points, nerflet_activations, dists):
         constants = tf.abs(self.constants)
-        centers = self.centers
-        radii = tf.abs(self.radii)
+        centers = self.centers 
+        radii = tf.tile(tf.abs(self.radii), [1, 3])
         rotations = self.rotations  # Wraps around infinitely?
         
         # Inputs are NeRF outputs to be blended:
         rbfs = eval_rbf(world_space_points, centers, radii, rotations)
         constants = tf.expand_dims(constants, axis=1)
         rbfs = rbfs * constants
+
+        # Apply an l1 penalty so that blobs don't overlap much in influence:
+        no_penalty_threshold = 0.005
+        penalty = tf.reduce_mean(tf.reduce_sum(tf.abs(rbfs - no_penalty_threshold), axis=0))
+
 
         assert len(rbfs.shape) == 3
 
@@ -248,22 +253,18 @@ class LDIFLayer(tf.keras.layers.Layer):
                 rbf_nontrivial = tf.cast(rbfs > thresh, dtype=tf.float32)
                 n_nontrivial = tf.reduce_mean(tf.reduce_sum(rbf_nontrivial, axis=0))
                 tf.print(f'Average number of nontrivial rbfs per point at thresh {thresh}: ', n_nontrivial)
-                n_nontrivial = tf.reduce_sum(rbf_nontrivial, axis=0)
+                n_nontrivial = tf.reshape(tf.reduce_sum(rbf_nontrivial, axis=1), [-1])
                 tf.print(f'Number of nontrivial points per rbf at thresh {thresh}: ', n_nontrivial)
+                print(f'Shape of nontrivial points per rbf: {n_nontrivial.shape}')
                 frac_sums_nontrivial = tf.reduce_mean(tf.cast(rbf_sums > thresh, dtype=tf.float32))
-
-            
-
-
+                tf.print(f'Fraction of RBF sums that are nontrivial at thresh {thresh}: ', frac_sums_nontrivial)
 
         self.call_count += 1
-        return outputs
+        return outputs, penalty
 
 
 def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False,
     n_elts=None):
-    assert D == 4
-    assert W == 64
     relu = tf.keras.layers.ReLU()
     def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
 

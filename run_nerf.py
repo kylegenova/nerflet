@@ -23,7 +23,11 @@ def batchify(fn, chunk):
         return fn
 
     def ret(inputs):
-        return tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        #return tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        applied = [fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)]
+        o0s = tf.concat([x[0] for x in applied], axis=0)
+        o1s = tf.reduce_mean([x[1] for x in applied]) #concat([x[1] for x in applied], axis=0)
+        return o0s, o1s
     return ret
 
 
@@ -50,10 +54,10 @@ def run_network(inputs, viewdirs, dists, fn, embed_fn, embeddirs_fn, netchunk=10
     embedded = tf.concat([embedded, inputs_flat, dists], -1)
     #print(f'New embedded shape {embedded.shape}')
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs_flat, blob_reg_flat = batchify(fn, netchunk)(embedded)
     outputs = tf.reshape(outputs_flat, list(
         inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-    return outputs
+    return outputs, blob_reg_flat
 
 
 def render_rays(ray_batch,
@@ -221,7 +225,7 @@ def render_rays(ray_batch,
 
     # Evaluate model at each point.
     dists = get_dists(z_vals, rays_d)
-    raw = network_query_fn(pts, viewdirs, dists, network_fn)  # [N_rays, N_samples, 4]
+    raw, blob_reg = network_query_fn(pts, viewdirs, dists, network_fn)  # [N_rays, N_samples, 4]
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
         raw, z_vals, rays_d)
 
@@ -243,11 +247,12 @@ def render_rays(ray_batch,
         # Make predictions with network_fine.
         run_fn = network_fn if network_fine is None else network_fine
         dists = get_dists(z_vals, rays_d)
-        raw = network_query_fn(pts, viewdirs, dists, run_fn)
+        raw, extra_blob_reg = network_query_fn(pts, viewdirs, dists, run_fn)
+        blob_reg = blob_reg + extra_blob_reg
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
             raw, z_vals, rays_d)
 
-    ret = {'rgb_map': rgb_map, 'disp_map': disp_map, 'acc_map': acc_map}
+    ret = {'rgb_map': rgb_map, 'disp_map': disp_map, 'acc_map': acc_map, 'blob_reg': blob_reg}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
@@ -272,7 +277,9 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
                 all_ret[k] = []
             all_ret[k].append(ret[k])
 
-    all_ret = {k: tf.concat(all_ret[k], 0) for k in all_ret}
+    blob_reg = all_ret['blob_reg']
+    all_ret = {k: tf.concat(all_ret[k], 0) for k in all_ret if k != 'blob_reg'}
+    all_ret['blob_reg'] = blob_reg
     return all_ret
 
 
@@ -346,6 +353,8 @@ def render(H, W, focal,
     # Render and reshape
     all_ret = batchify_rays(rays, chunk, **kwargs)
     for k in all_ret:
+        if k == 'blob_reg':
+            continue
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = tf.reshape(all_ret[k], k_sh)
 
@@ -506,6 +515,7 @@ def config_parser():
                         help='channels per layer in fine network')
     parser.add_argument("--N_rand", type=int, default=32*32*4,
                         help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--blob_reg", type=float, default=0.0001, help='L1 regularization on blob size')
     parser.add_argument("--lrate", type=float,
                         default=5e-4, help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250,
@@ -841,7 +851,9 @@ def train():
             # Compute MSE loss between predicted and true RGB.
             img_loss = img2mse(rgb, target_s)
             trans = extras['raw'][..., -1]
-            loss = img_loss
+            tf.print('Blob reg: ', extras['blob_reg'])
+            
+            loss = img_loss + args.blob_reg * extras['blob_reg'][0]
             psnr = mse2psnr(img_loss)
 
             # Add MSE loss for coarse-grained model
@@ -919,6 +931,8 @@ def train():
             centers = weights[start_idx + 1]
             assert centers.shape == (args.n_elts, 3)
             radii = weights[start_idx + 2]
+            if (radii.shape[1] == 1):
+                radii = np.tile(radii, [1, 3])
             assert radii.shape == (args.n_elts, 3)
             rotations = weights[start_idx + 3]
             assert rotations.shape == (args.n_elts, 3)
@@ -940,9 +954,21 @@ def train():
                 save_weights(models[k], k, i)
 
         if i % args.i_sif == 0:
+            if not os.path.isdir(
+                    os.path.join(basedir, expname, 'sif')):
+                os.mkdir(os.path.join(basedir, expname, 'sif'))
             path = os.path.join(
-                basedir, expname, 'sif_{:06d}.txt'.format(i))
+                basedir, expname, 'sif/sif_{:06d}.txt'.format(i))
             save_sif(models['model'].get_weights(), path)
+            if 'model_fine' in models:
+                d = os.path.join(basedir, expname, 'sif_fine')
+                if not os.path.isdir(d):
+                    os.mkdir(d)
+                path = os.path.join(d, 'sif_{:06d}.txt'.format(i))
+                save_sif(models['model_fine'].get_weights(), path)
+            else:
+                print('No fine model for SIFs to write')
+
 
         if i % args.i_video == 0 and i > 0:
 
