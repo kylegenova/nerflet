@@ -31,7 +31,7 @@ def batchify(fn, chunk):
     return ret
 
 
-def run_network(inputs, viewdirs, dists, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+def run_network(inputs, viewdirs, dists, fn, embed_fn, embeddirs_fn, netchunk):
     """Prepares inputs and applies network 'fn'."""
 
     inputs_flat = tf.reshape(inputs, [-1, inputs.shape[-1]])
@@ -267,7 +267,7 @@ def render_rays(ray_batch,
     return ret
 
 
-def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(rays_flat, chunk, **kwargs):
     """Render rays in smaller minibatches to avoid OOM."""
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
@@ -284,7 +284,7 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
 
 
 def render(H, W, focal,
-           chunk=1024*32, rays=None, c2w=None, ndc=True,
+           chunk, rays=None, c2w=None, ndc=True, # 1024*32
            near=0., far=1.,
            use_viewdirs=False, c2w_staticcam=None,
            **kwargs):
@@ -478,7 +478,11 @@ def create_nerf(args):
     if len(ckpts) > 0 and not args.no_reload:
         ft_weights = ckpts[-1]
         print('Reloading from', ft_weights)
-        model.set_weights(np.load(ft_weights, allow_pickle=True))
+        #model.load_weights(ft_weights)
+        # ws = np.load(ft_weights, allow_pickle=True)
+        # print('Loaded weights: ')
+        # print(ws)
+        model.set_weights(np.load(ft_weights, allow_pickle=True)[1:])
         start = int(ft_weights[-10:-4]) + 1
         print('Resetting step to', start)
 
@@ -486,7 +490,7 @@ def create_nerf(args):
             ft_weights_fine = '{}_fine_{}'.format(
                 ft_weights[:-11], ft_weights[-10:])
             print('Reloading fine from', ft_weights_fine)
-            model_fine.set_weights(np.load(ft_weights_fine, allow_pickle=True))
+            model_fine.set_weights(np.load(ft_weights_fine, allow_pickle=True)[1:])
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, models
 
@@ -597,11 +601,11 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500,
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000,
+    parser.add_argument("--i_weights", type=int, default=5000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000,
+    parser.add_argument("--i_testset", type=int, default=25000,
                         help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=50000,
+    parser.add_argument("--i_video",   type=int, default=25000,
                         help='frequency of render_poses video saving')
     parser.add_argument("--i_sif", type=int, default=10,
                         help='frequency of sif txt saving')
@@ -946,7 +950,20 @@ def train():
         def save_weights(net, prefix, i):
             path = os.path.join(
                 basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
-            np.save(path, net.get_weights())
+            print('Weights: ')
+            for w in net.get_weights():
+                print(w.shape)
+            #print(net.get_weights())
+            if True:#prefix == 'optimizer':
+                ws = net.get_weights()
+                print(type(ws))
+                assert type(ws) == list
+                ws = [np.empty(())] + ws
+                np.save(path, ws)#net.get_weights())
+            else:
+                net.save_weights(path)
+            #np.save(path, net.get_weights())
+            #net.save_weights(path)
             print('saved weights at', path)
 
         if i % args.i_weights == 0:

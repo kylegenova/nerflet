@@ -181,29 +181,64 @@ def init_ldif(n_elts=32):
     return (constants, centers, radii, rotations), grad_vars
 
 
+class KFCLayer(tf.keras.layers.Layer):
+    def __init__(self, n_duplicates, output_width, activation=None):
+        super(KFCLayer, self).__init__()
+        self.output_width = output_width
+        self.n_duplicates = n_duplicates
+        self.activation = activation
+
+    def build(self, input_shape):
+        print('Input shape: ', input_shape)
+        input_width = input_shape[-1]
+        initializer = tf.keras.initializers.glorot_uniform()
+        w_inits = np.stack([initializer(shape=(input_width, self.output_width), dtype='float32') for _ in range(self.n_duplicates)])
+        #print(f'Initial weights: {w_inits}')
+        #w_init = tf.keras.initializers.GlorotUniform()(shape=(input_width, output_width))
+        self.w = tf.Variable(initial_value=w_inits, trainable=True, name='BatchWeight', dtype=tf.float32)
+        self.b = self.add_weight(shape=(self.n_duplicates, 1, self.output_width), initializer='zeros', trainable=True, name='BatchBias', dtype=tf.float32)
+
+        print(f'Weights, bias shape: {self.w.shape} and {self.b.shape}')
+        #import sys
+        #sys.exit(1)
+        #self.weights = self.add_weight(shape=(self.n_duplicates, input_width, output_width
+
+    def call(self, inputs):
+        #print(f'KFCLayer input shape: {inputs.shape}')
+        assert len(inputs.shape) == 3
+        assert inputs.shape[0] == self.n_duplicates
+        # inputs = tf.expand_dims(inputs, axis=0)
+        # inputs = tf.tile(inputs, [self.n_duplicates, 1, 1])
+        outputs = tf.matmul(inputs, self.w) + self.b
+        if self.activation is not None:
+            outputs = self.activation(outputs)
+        #print(f'KFCLayer output shape: {outputs.shape}')
+        return outputs
+
+
 class LDIFLayer(tf.keras.layers.Layer):
     def __init__(self, n_elts):
         super(LDIFLayer, self).__init__()
         self.n_elts = n_elts
 
     def build(self, input_shape):
-        self.constants = self.add_weight(shape=(self.n_elts, 1),
+        self.constants = self.add_weight(name='constants', shape=(self.n_elts, 1),
                 initializer=tf.keras.initializers.RandomUniform(10.0, 20.0),
                 trainable=True)
-        self.centers = self.add_weight(shape=(self.n_elts, 3),
+        self.centers = self.add_weight(name='centers', shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-0.45, 0.45),
                 trainable=True)
-        self.radii = self.add_weight(shape=(self.n_elts, 1),
+        self.radii = self.add_weight(name='radii', shape=(self.n_elts, 1),
                 initializer=tf.keras.initializers.RandomUniform(0.05, 0.06),
                 trainable=True)
-        self.rotations = self.add_weight(shape=(self.n_elts, 3),
+        self.rotations = self.add_weight(name='rotations', shape=(self.n_elts, 3),
                 initializer=tf.keras.initializers.RandomUniform(-1.0 * np.pi, np.pi),
                 trainable=True)
         self.call_count = 0
 
     def call(self, world_space_points, nerflet_activations, dists):
         constants = tf.abs(self.constants)
-        centers = self.centers 
+        centers = self.centers
         radii = tf.tile(tf.abs(self.radii), [1, 3])
         rotations = self.rotations  # Wraps around infinitely?
         
@@ -219,10 +254,13 @@ class LDIFLayer(tf.keras.layers.Layer):
 
         assert len(rbfs.shape) == 3
 
-        assert len(nerflet_activations) == self.n_elts
+        #assert len(nerflet_activations) == self.n_elts
+        if isinstance(nerflet_activations, list):
+            nerflet_activations = tf.stack(nerflet_activations)
 
         # Abs because each nerflet should be nonegative in rgb and opacity everywhere:
-        nerflet_activations = tf.stack(nerflet_activations)
+        #print(f'Nerflet activation shape: {nerflet_activations.shape}')
+        #nerflet_activations = tf.stack(nerflet_activations)
 
         # Map to RGBa:
         alpha = 1.0 - tf.exp(-tf.nn.relu(nerflet_activations[..., -1:]) * tf.expand_dims(dists, axis=0))
@@ -267,6 +305,7 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     n_elts=None):
     relu = tf.keras.layers.ReLU()
     def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
+    def stacked_dense(W, act=relu): return KFCLayer(n_elts, W, activation=act)
 
     print('MODEL', input_ch, input_ch_views, type(
         input_ch), type(input_ch_views), use_viewdirs)
@@ -287,6 +326,10 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     inputs_views.set_shape([None, input_ch_views])
     input_unembedded_pts.set_shape([None, 3])
 
+    stacked_inputs_pts = tf.tile(tf.expand_dims(inputs_pts, 0), [n_elts, 1, 1])
+    stacked_inputs_views = tf.tile(tf.expand_dims(inputs_views, 0), [n_elts, 1, 1])
+    stacked_input_unembedded_pts = tf.tile(tf.expand_dims(input_unembedded_pts, 0), [n_elts, 1, 1])
+
     #rbfs = eval_rbf(input_unembedded_pts, centers, radii, rotations)  # Shape [EC, N, 1]
     #print(f'RBF Shapes: {rbfs.shape}')
     #constants = tf.expand_dims(constants, axis=1)  # Shape [EC, 1, 1]
@@ -304,33 +347,52 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
 
     #rbfs = tf.zeros_like(rbfs)
 
-    nerflet_activations = []
-    for i in range(n_elts):
-      # Make a NeRF per element:
-      print(inputs.shape, inputs_pts.shape, inputs_views.shape)
-      # TODO(kgenova) Consider transforming (pre-embedding) to local frame, instead of doing all in global frame.
-      # Need to also transform input views for that...
-      outputs = inputs_pts
-      for i in range(D):
-          outputs = dense(W)(outputs)
-          if i in skips:
-              outputs = tf.concat([inputs_pts, outputs], -1)
+    # V0 (commented out):
+    if False:
+        nerflet_activations = []
+        for i in range(n_elts):
+          # Make a NeRF per element:
+          print(inputs.shape, inputs_pts.shape, inputs_views.shape)
+          # TODO(kgenova) Consider transforming (pre-embedding) to local frame, instead of doing all in global frame.
+          # Need to also transform input views for that...
+          outputs = inputs_pts
+          for i in range(D):
+              outputs = dense(W)(outputs)
+              if i in skips:
+                  outputs = tf.concat([inputs_pts, outputs], -1)
 
-      if use_viewdirs:
-          alpha_out = dense(1, act=None)(outputs)
-          bottleneck = dense(256, act=None)(outputs)
-          inputs_viewdirs = tf.concat(
-              [bottleneck, inputs_views], -1)  # concat viewdirs
-          outputs = inputs_viewdirs
-          # The supplement to the paper states there are 4 hidden layers here, but this is an error since
-          # the experiments were actually run with 1 hidden layer, so we will leave it as 1.
-          for i in range(1):
-              outputs = dense(W//2)(outputs)
-          outputs = dense(3, act=None)(outputs)
-          outputs = tf.concat([outputs, alpha_out], -1)
-      else:
-          outputs = dense(output_ch, act=None)(outputs)
-      nerflet_activations.append(outputs)
+          if use_viewdirs:
+              alpha_out = dense(1, act=None)(outputs)
+              bottleneck = dense(W, act=None)(outputs)
+              inputs_viewdirs = tf.concat(
+                  [bottleneck, inputs_views], -1)  # concat viewdirs
+              outputs = inputs_viewdirs
+              # The supplement to the paper states there are 4 hidden layers here, but this is an error since
+              # the experiments were actually run with 1 hidden layer, so we will leave it as 1.
+              for i in range(1):
+                  outputs = dense(W//2)(outputs)
+              outputs = dense(3, act=None)(outputs)
+              outputs = tf.concat([outputs, alpha_out], -1)
+          else:
+              outputs = dense(output_ch, act=None)(outputs)
+          nerflet_activations.append(outputs)
+    else:
+        outputs = stacked_inputs_pts
+        for i in range(D):
+            outputs = stacked_dense(W)(outputs)
+            if i in skips:
+                outputs = tf.concat([stacked_inputs_pts, outputs], -1)
+        if use_viewdirs:
+            alpha_out = stacked_dense(1, act=None)(outputs)
+            bottleneck = stacked_dense(W, act=None)(outputs)
+            inputs_viewdirs = tf.concat(
+                    [bottleneck, stacked_inputs_views], -1)
+            outputs = inputs_viewdirs
+            for i in range(1):
+                outputs = stacked_dense(W//2)(outputs)
+            outputs = stacked_dense(3, act=None)(outputs)
+            outputs = tf.concat([outputs, alpha_out], -1)
+        nerflet_activations = outputs
    
     #assert len(outputs_per_elt) == n_elts
     #outputs = tf.stack(outputs_per_elt, axis=0)  # Now should have shape [EC, N, output_ch]

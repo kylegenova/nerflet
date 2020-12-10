@@ -4,10 +4,15 @@ from joblib import Parallel, delayed
 import tqdm
 
 import sys
-if len(sys.argv) == 2:
+if len(sys.argv) >= 2:
   every_k = int(sys.argv[1])
 else:
   every_k = 10
+
+if len(sys.argv) >= 3 and sys.argv[2] == 'fine':
+  sifstr = 'sif_fine'
+else:
+  sifstr = 'sif'
 
 expname = 'lego_coarse_nerflet_test'
 def write_im(idx, i):
@@ -16,7 +21,7 @@ def write_im(idx, i):
   if not os.path.isdir(outdir):
     os.mkdir(outdir)
   out_path = f'{outdir}/{str(i).zfill(6)}.png'
-  cmd = f'qview /home/kgenova/nerflet/logs/{expname}/sif/sif_{str(idx).zfill(6)}.txt -camera 2.8018 3.33692 4.7267  -0.443111 -0.459386 -0.769816  -0.209809 0.888016 -0.409154 -show_axes -image {out_path}'
+  cmd = f'qview /home/kgenova/nerflet/logs/{expname}/{sifstr}/sif_{str(idx).zfill(6)}.txt -camera 2.8018 3.33692 4.7267  -0.443111 -0.459386 -0.769816  -0.209809 0.888016 -0.409154 -show_axes -image {out_path}'
   sp.check_output(cmd, shell=True)
 
 idx = 10
@@ -26,7 +31,7 @@ idxs = []
 inds = []
 while True:
   print(f'Idx: {idx}')
-  path = f'/home/kgenova/nerflet/logs/{expname}/sif/sif_{str(idx).zfill(6)}.txt'
+  path = f'/home/kgenova/nerflet/logs/{expname}/{sifstr}/sif_{str(idx).zfill(6)}.txt'
   if not os.path.isfile(path):
     print(f'No sif {path}')
     break
@@ -41,7 +46,7 @@ for p in tqdm.tqdm(to_proc):
   write_im(*p)
 #Parallel(n_jobs=1, backend='threading')(delayed(write_im(*a))(a) for a in tqdm.tqdm(to_proc))
 
-outvid = f'/home/kgenova/nerflet/logs/{expname}/sifs.mp4'
+outvid = f'/home/kgenova/nerflet/logs/{expname}/{sifstr}.mp4'
 cmd = f'ffmpeg -y -i /home/kgenova/nerflet/logs/{expname}/qvid/%06d.png {outvid}'
 #cmd = f'convert -delay 10 -loop 1 /home/kgenova/nerflet/logs/{expname}/qvid/*.png /home/kgenova/nerflet/logs/{expname}/sifs.gif'
 sp.check_output(cmd, shell=True)
