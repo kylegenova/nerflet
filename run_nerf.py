@@ -23,10 +23,9 @@ def batchify(fn, chunk):
         return fn
 
     def ret(inputs):
-        #return tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
         applied = [fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)]
         o0s = tf.concat([x[0] for x in applied], axis=0)
-        o1s = tf.reduce_sum([x[1] for x in applied]) #concat([x[1] for x in applied], axis=0)
+        o1s = tf.reduce_mean([x[1] for x in applied])
         return o0s, o1s
     return ret
 
