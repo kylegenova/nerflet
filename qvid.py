@@ -4,10 +4,17 @@ from joblib import Parallel, delayed
 import tqdm
 
 import sys
-if len(sys.argv) >= 2:
-  every_k = int(sys.argv[1])
-else:
-  every_k = 10
+import argparse
+
+parser = argparse.ArgumentParser(description='Create a video of rasterized blob weights')
+parser.add_argument('--every_k', type=int, default=10)
+parser.add_argument('--start_idx', type=int, default=0)
+parser.add_argument('--end_idx', type=int, default=-1)
+args = parser.parse_args()
+#if len(sys.argv) >= 2:
+#  every_k = int(sys.argv[1])
+#else:
+#  every_k = 10
 
 if len(sys.argv) >= 3 and sys.argv[2] == 'fine':
   sifstr = 'sif_fine'
@@ -24,7 +31,7 @@ def write_im(idx, i):
   cmd = f'qview /home/kgenova/nerflet/logs/{expname}/{sifstr}/sif_{str(idx).zfill(6)}.txt -camera 2.8018 3.33692 4.7267  -0.443111 -0.459386 -0.769816  -0.209809 0.888016 -0.409154 -show_axes -image {out_path}'
   sp.check_output(cmd, shell=True)
 
-idx = 10
+idx = args.start_idx
 i = 0
 
 idxs = []
@@ -38,7 +45,9 @@ while True:
   #write_im(idx, i)
   idxs.append(idx)
   inds.append(i)
-  idx += every_k
+  if args.end_idx > 0 and idx >= args.end_idx:
+      break
+  idx += args.every_k
   i += 1
 to_proc = list(zip(idxs, inds))
 print(to_proc)

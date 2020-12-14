@@ -26,7 +26,7 @@ def batchify(fn, chunk):
         #return tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
         applied = [fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)]
         o0s = tf.concat([x[0] for x in applied], axis=0)
-        o1s = tf.reduce_mean([x[1] for x in applied]) #concat([x[1] for x in applied], axis=0)
+        o1s = tf.reduce_sum([x[1] for x in applied]) #concat([x[1] for x in applied], axis=0)
         return o0s, o1s
     return ret
 
@@ -378,13 +378,16 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     disps = []
 
     t = time.time()
-    for i, c2w in enumerate(render_poses):
+    for i, c2w in enumerate(render_poses[5:6]):
+        i = 5
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(
+        rgb, disp, acc, extras = render(
             H, W, focal, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
         rgbs.append(rgb.numpy())
         disps.append(disp.numpy())
+        n_nontrivial = np.sum([x.numpy().astype(np.float64) for x in extras['blob_reg']])
+        print(f'Number nontrivial evaluations: {n_nontrivial}')
         if i == 0:
             print(rgb.shape, disp.shape)
 
@@ -422,7 +425,7 @@ def create_nerf(args):
         D=args.netdepth, W=args.netwidth,
         input_ch=input_ch, output_ch=output_ch, skips=skips,
         input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-        n_elts=args.n_elts)
+        n_elts=args.n_elts, is_fine=False)
     grad_vars = model.trainable_variables
     models = {'model': model}
 
@@ -432,7 +435,7 @@ def create_nerf(args):
             D=args.netdepth_fine, W=args.netwidth_fine,
             input_ch=input_ch, output_ch=output_ch, skips=skips,
             input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs,
-            n_elts=args.n_elts)
+            n_elts=args.n_elts, is_fine=True)
         grad_vars += model_fine.trainable_variables
         models['model_fine'] = model_fine
 
@@ -857,7 +860,7 @@ def train():
             trans = extras['raw'][..., -1]
             tf.print('Blob reg: ', extras['blob_reg'])
             
-            loss = img_loss + args.blob_reg * extras['blob_reg'][0]
+            loss = img_loss + extras['blob_reg'][0] #args.blob_reg * extras['blob_reg'][0]
             psnr = mse2psnr(img_loss)
 
             # Add MSE loss for coarse-grained model
@@ -929,21 +932,27 @@ def train():
 
         def save_sif(weights, path):
             #print(len(weights))
-            start_idx = len(weights) - 4
+            start_idx = len(weights) - 5
             constants = weights[start_idx]
             assert constants.shape == (args.n_elts, 1)
             centers = weights[start_idx + 1]
             assert centers.shape == (args.n_elts, 3)
-            radii = weights[start_idx + 2]
+            # We learn covariances, take reciprocal to get radii:
+            #radii = 1 / (weights[start_idx + 2] * weights[start_idx + 2] + 1e-8)
+            #radii = np.minimum(np.abs(weights[start_idx + 2]) + 0.005, 0.1)
+            radii = np.abs(weights[start_idx + 2]) + 0.005
+            #radii = weights[start_idx + 2] * weights[start_idx + 2]
             if (radii.shape[1] == 1):
                 radii = np.tile(radii, [1, 3])
             assert radii.shape == (args.n_elts, 3)
             rotations = weights[start_idx + 3]
             assert rotations.shape == (args.n_elts, 3)
+            epsilon = weights[start_idx + 4]
             print(f'Constants: {constants}')
             print(f'Centers: {centers}')
             print(f'Radii: {radii}')
             print(f'Rotations: {rotations}')
+            print(f'Learned epsilon: {epsilon}')
             with open(path, 'wt') as f:
                 f.write(encode_sif_v1(constants, centers, radii, rotations))
 
